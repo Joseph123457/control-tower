@@ -414,8 +414,10 @@ export class CliRunner extends EventEmitter {
       args.push('--dangerously-skip-permissions');
     }
 
-    // 세션 모드
-    if (options.sessionMode) {
+    // 세션 모드 (resume 우선)
+    if (options.resumeSessionId) {
+      args.push('--resume', options.resumeSessionId);
+    } else if (options.sessionMode) {
       args.push('--continue');
     }
 

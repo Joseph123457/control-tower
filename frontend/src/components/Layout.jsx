@@ -21,7 +21,8 @@ import {
   CheckCircle,
   AlertCircle,
   AlertTriangle,
-  Info
+  Info,
+  Search
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -31,7 +32,8 @@ const ICONS = {
   FileText,
   LayoutDashboard,
   Play,
-  History
+  History,
+  Search
 };
 
 // 알림 타입별 스타일

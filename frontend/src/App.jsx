@@ -15,6 +15,7 @@ import PromptsTab from './components/PromptsTab';
 import DashboardTab from './components/DashboardTab';
 import RunnerTab from './components/RunnerTab';
 import SessionsTab from './components/SessionsTab';
+import ClaudeSessionsTab from './components/ClaudeSessionsTab';
 
 // ============================================================
 // 상수 정의
@@ -25,7 +26,8 @@ const TABS = [
   { id: 'prompts', label: '프롬프트', icon: 'FileText' },
   { id: 'dashboard', label: '대시보드', icon: 'LayoutDashboard' },
   { id: 'runner', label: '실행', icon: 'Play' },
-  { id: 'sessions', label: '세션', icon: 'History' }
+  { id: 'sessions', label: '세션', icon: 'History' },
+  { id: 'claude-sessions', label: '세션 탐색기', icon: 'Search' }
 ];
 
 // Socket.IO 서버 URL
@@ -378,6 +380,8 @@ function App() {
         return <RunnerTab {...commonProps} />;
       case 'sessions':
         return <SessionsTab {...commonProps} />;
+      case 'claude-sessions':
+        return <ClaudeSessionsTab {...commonProps} />;
       default:
         return <WizardTab {...commonProps} />;
     }

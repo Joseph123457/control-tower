@@ -20,6 +20,7 @@ import dotenv from 'dotenv';
 import configRoutes from './routes/config.js';
 import promptsRoutes from './routes/prompts.js';
 import runnerRoutes from './routes/runner.js';
+import claudeSessionsRoutes from './routes/claudeSessions.js';
 
 // 서비스 임포트
 import { CliRunner, setupSocketHandlers } from './services/cliRunner.js';
@@ -112,6 +113,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/config', configRoutes);
 app.use('/api/prompts', promptsRoutes);
 app.use('/api/runner', runnerRoutes);
+app.use('/api/claude-sessions', claudeSessionsRoutes);
 
 // ============================================================
 // 추가 API 엔드포인트 (runner 확장)
@@ -346,6 +348,33 @@ io.on('connection', (socket) => {
       await cliRunner.runAllSteps(steps, options);
     } catch (error) {
       socket.emit('run-error', { error: error.message });
+    }
+  });
+
+  // 세션 연결 (resume) 실행 요청
+  socket.on('resume-session', async (data) => {
+    try {
+      const { sessionId, prompt } = data;
+      if (!sessionId || !prompt) {
+        socket.emit('step-error', { stepId: 'resume', error: '세션 ID와 프롬프트가 필요합니다.' });
+        return;
+      }
+
+      const step = {
+        id: `resume-${sessionId.substring(0, 8)}`,
+        title: `세션 ${sessionId.substring(0, 8)} 연결`,
+        prompt
+      };
+
+      await cliRunner.runStep(step, {
+        resumeSessionId: sessionId,
+        skipPermissions: true
+      });
+    } catch (error) {
+      socket.emit('step-error', {
+        stepId: 'resume',
+        error: error.message
+      });
     }
   });
 
