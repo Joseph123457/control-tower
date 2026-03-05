@@ -72,6 +72,13 @@ function App() {
   // 생성된 설정 (마법사에서 공유)
   const [generatedConfig, setGeneratedConfig] = useState(null);
 
+  // 프로젝트 설정 (마법사에서 공유)
+  const [projectSettings, setProjectSettings] = useState({
+    projectName: '',
+    projectPath: '.',
+    autoCommit: true
+  });
+
   // 알림 상태
   const [notification, setNotification] = useState(null);
 
@@ -301,13 +308,19 @@ function App() {
     socket.emit('run-all', {
       steps,
       options: {
-        projectPath: '.',
-        sessionMode: true
+        projectPath: projectSettings.projectPath || '.',
+        projectName: projectSettings.projectName || '',
+        sessionMode: true,
+        autoCommit: projectSettings.autoCommit !== false
       }
     });
 
+    const pathInfo = projectSettings.projectName
+      ? `${projectSettings.projectPath}/${projectSettings.projectName}`
+      : projectSettings.projectPath || '.';
     addLog('system', `═══ 전체 실행 시작 (${steps.length}개 스텝) ═══`);
-  }, [socket, isConnected, steps, serverStatus, resetSteps, clearLogs, addLog, showNotification]);
+    addLog('system', `📁 프로젝트 경로: ${pathInfo}`);
+  }, [socket, isConnected, steps, serverStatus, projectSettings, resetSteps, clearLogs, addLog, showNotification]);
 
   // 실행 중지
   const handleStop = useCallback(() => {
@@ -359,6 +372,8 @@ function App() {
       serverStatus,
       generatedConfig,
       setGeneratedConfig,
+      projectSettings,
+      setProjectSettings,
       onRunAll: handleRunAll,
       onStop: handleStop,
       onRunStep: handleRunStep,

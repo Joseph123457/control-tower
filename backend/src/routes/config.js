@@ -4,6 +4,9 @@
  */
 
 import { Router } from 'express';
+import { readdirSync, statSync, existsSync } from 'fs';
+import { join, resolve } from 'path';
+import { homedir } from 'os';
 import {
   generateSettings,
   generateClaudeMd,
@@ -245,6 +248,143 @@ router.post('/apply-preset', (req, res) => {
     success: true,
     data: preset
   });
+});
+
+/**
+ * GET /api/config/browse-folders
+ * 폴더 목록 조회 (폴더 탐색기용)
+ */
+router.get('/browse-folders', (req, res) => {
+  try {
+    let { path: currentPath } = req.query;
+
+    // 기본 경로
+    if (!currentPath || currentPath === '~') {
+      currentPath = homedir();
+    } else if (currentPath.startsWith('~')) {
+      currentPath = join(homedir(), currentPath.slice(1));
+    }
+
+    // 경로 정규화
+    currentPath = resolve(currentPath);
+
+    // 경로 존재 확인
+    if (!existsSync(currentPath)) {
+      return res.status(404).json({
+        success: false,
+        error: '경로를 찾을 수 없습니다.'
+      });
+    }
+
+    // 폴더 목록 조회
+    const items = readdirSync(currentPath, { withFileTypes: true })
+      .filter(item => item.isDirectory())
+      .filter(item => !item.name.startsWith('.') && item.name !== 'node_modules')
+      .map(item => ({
+        name: item.name,
+        path: join(currentPath, item.name),
+        isDirectory: true
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    // 상위 폴더 정보
+    const parentPath = resolve(currentPath, '..');
+    const hasParent = parentPath !== currentPath;
+
+    res.json({
+      success: true,
+      data: {
+        currentPath,
+        parentPath: hasParent ? parentPath : null,
+        items
+      }
+    });
+  } catch (error) {
+    logger.error('폴더 탐색 실패:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/config/drives
+ * Windows 드라이브 목록 (Windows 전용)
+ */
+router.get('/drives', (req, res) => {
+  try {
+    if (process.platform !== 'win32') {
+      return res.json({
+        success: true,
+        data: [{ name: '/', path: '/' }]
+      });
+    }
+
+    // Windows 드라이브 목록
+    const drives = [];
+    for (let i = 65; i <= 90; i++) { // A-Z
+      const driveLetter = String.fromCharCode(i);
+      const drivePath = `${driveLetter}:\\`;
+      if (existsSync(drivePath)) {
+        drives.push({
+          name: `${driveLetter}:`,
+          path: drivePath
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: drives
+    });
+  } catch (error) {
+    logger.error('드라이브 목록 조회 실패:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/config/validate-path
+ * 경로 유효성 검사
+ */
+router.post('/validate-path', (req, res) => {
+  try {
+    let { path: inputPath } = req.body;
+
+    if (!inputPath) {
+      return res.json({
+        success: true,
+        data: { valid: false, message: '경로를 입력하세요.' }
+      });
+    }
+
+    // ~ 처리
+    if (inputPath.startsWith('~')) {
+      inputPath = join(homedir(), inputPath.slice(1));
+    }
+
+    const fullPath = resolve(inputPath);
+    const exists = existsSync(fullPath);
+
+    res.json({
+      success: true,
+      data: {
+        valid: true,
+        exists,
+        resolvedPath: fullPath,
+        message: exists ? '유효한 경로입니다.' : '폴더가 생성됩니다.'
+      }
+    });
+  } catch (error) {
+    res.json({
+      success: true,
+      data: { valid: false, message: error.message }
+    });
+  }
 });
 
 export default router;

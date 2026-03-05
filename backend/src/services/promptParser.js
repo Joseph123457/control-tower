@@ -1,6 +1,10 @@
 /**
  * 프롬프트 파서 서비스
  * .md 파일 텍스트를 스텝 목록으로 파싱
+ *
+ * 두 가지 모드 지원:
+ * 1. 스텝별 모드: "### 프롬프트 N-N:" 형식의 단계별 가이드
+ * 2. 개발설계서 모드: 일반 CLAUDE.md 형식을 단일 프롬프트로 처리
  */
 
 import { logger } from '../utils/logger.js';
@@ -13,6 +17,7 @@ import { logger } from '../utils/logger.js';
  * @property {string} title - 스텝 제목
  * @property {string} prompt - 실행할 프롬프트 (코드블록 내용)
  * @property {'pending'|'running'|'completed'|'failed'} status - 상태
+ * @property {boolean} [isDevSpec] - 개발설계서 모드 여부
  */
 
 /**
@@ -38,14 +43,144 @@ const STEP_PATTERN = /^###\s*(?:프롬프트\s*)?(\d+)-(\d+)[.:\s]+(.+)$/i;
 const CODEBLOCK_PATTERN = /```(?:\w*)\n([\s\S]*?)```/g;
 
 /**
+ * 개발설계서에서 프로젝트 제목 추출
+ * @param {string} text - 마크다운 텍스트
+ * @returns {string} 프로젝트 제목
+ */
+function extractProjectTitle(text) {
+  const lines = text.split('\n');
+  for (const line of lines) {
+    const match = line.match(/^#\s+(.+?)(?:\s*[—\-–]|$)/);
+    if (match) {
+      return match[1].trim();
+    }
+  }
+  return '개발설계서';
+}
+
+/**
+ * 개발설계서 형식인지 확인
+ * @param {string} text - 마크다운 텍스트
+ * @returns {boolean}
+ */
+export function isDevSpec(text) {
+  if (!text) return false;
+
+  const devSpecPatterns = [
+    /개발지침서/i,
+    /개발설계서/i,
+    /기술\s*스택/i,
+    /파일\s*구조/i,
+    /기능\s*명세/i,
+    /Claude\s*Code/i,
+    /프로젝트\s*개요/i,
+    /핵심\s*목표/i
+  ];
+
+  return devSpecPatterns.some(pattern => pattern.test(text));
+}
+
+/**
+ * 개발설계서를 여러 단계로 분리하여 변환
+ * @param {string} text - 마크다운 텍스트
+ * @returns {Step[]} 스텝 배열
+ */
+export function parseAsDevSpec(text) {
+  const projectTitle = extractProjectTitle(text);
+  const steps = [];
+
+  // ## 섹션 기준으로 분리
+  const sections = text.split(/(?=^## )/m).filter(s => s.trim());
+
+  // 첫 번째 섹션 (# 제목 + 개요)
+  let introSection = '';
+  let mainSections = sections;
+
+  if (sections[0] && !sections[0].startsWith('## ')) {
+    introSection = sections[0];
+    mainSections = sections.slice(1);
+  }
+
+  // 스텝 1: 프로젝트 초기화
+  steps.push({
+    id: '1-1',
+    phase: '프로젝트 초기화',
+    phaseNum: 1,
+    stepNum: 1,
+    title: '프로젝트 폴더 및 기본 구조 생성',
+    prompt: `다음 개발설계서를 읽고 프로젝트의 기본 구조를 생성하세요.\n\n${introSection}\n\n---\n프로젝트 개요와 파일 구조를 파악하고 기본 폴더/파일을 생성하세요.`,
+    rawContent: introSection,
+    status: 'pending',
+    isDevSpec: true
+  });
+
+  // 주요 섹션별로 스텝 생성
+  let stepNum = 2;
+  const importantSections = mainSections.filter(section => {
+    const firstLine = section.split('\n')[0].toLowerCase();
+    return firstLine.includes('기능') ||
+           firstLine.includes('구현') ||
+           firstLine.includes('컴포넌트') ||
+           firstLine.includes('ui') ||
+           firstLine.includes('html') ||
+           firstLine.includes('css') ||
+           firstLine.includes('javascript') ||
+           firstLine.includes('로직') ||
+           firstLine.includes('레이아웃') ||
+           firstLine.includes('디자인');
+  });
+
+  const sectionsToProcess = importantSections.length > 0 ? importantSections : mainSections.slice(0, 5);
+
+  sectionsToProcess.forEach((section, index) => {
+    const sectionTitle = section.split('\n')[0].replace(/^##\s*/, '').replace(/\d+\.\s*/, '').trim();
+
+    steps.push({
+      id: `1-${stepNum}`,
+      phase: '기능 구현',
+      phaseNum: 1,
+      stepNum: stepNum,
+      title: sectionTitle || `섹션 ${index + 1} 구현`,
+      prompt: `다음 섹션의 내용을 구현하세요:\n\n${section}\n\n---\n위 명세에 따라 코드를 작성하세요.`,
+      rawContent: section,
+      status: 'pending',
+      isDevSpec: true
+    });
+    stepNum++;
+  });
+
+  // 마지막 스텝: 통합 및 테스트
+  steps.push({
+    id: `1-${stepNum}`,
+    phase: '완료',
+    phaseNum: 1,
+    stepNum: stepNum,
+    title: '통합 테스트 및 마무리',
+    prompt: `지금까지 구현한 ${projectTitle} 프로젝트를 검토하고 완료하세요.`,
+    rawContent: '',
+    status: 'pending',
+    isDevSpec: true
+  });
+
+  logger.info(`개발설계서 파싱: ${steps.length}개 스텝 생성`);
+  return steps;
+}
+
+/**
  * 프롬프트 텍스트를 스텝 목록으로 파싱
  * @param {string} text - 마크다운 텍스트
+ * @param {Object} options - 옵션 { forceDevSpec: boolean }
  * @returns {Step[]} 스텝 목록
  */
-export function parsePromptFile(text) {
+export function parsePromptFile(text, options = {}) {
   if (!text || typeof text !== 'string') {
     logger.warn('파싱할 텍스트가 없습니다.');
     return [];
+  }
+
+  // 강제 개발설계서 모드
+  if (options.forceDevSpec) {
+    return parseAsDevSpec(text);
   }
 
   const lines = text.split('\n');
@@ -135,6 +270,11 @@ export function parsePromptFile(text) {
   // 마지막 스텝 저장
   saveCurrentStep();
 
+  // 스텝을 찾지 못하고 개발설계서 형식이면 단일 스텝으로 변환
+  if (steps.length === 0 && isDevSpec(text)) {
+    return parseAsDevSpec(text);
+  }
+
   // ID 순으로 정렬
   steps.sort((a, b) => {
     if (a.phaseNum !== b.phaseNum) {
@@ -218,6 +358,8 @@ export function findNextPendingStep(steps) {
 
 export default {
   parsePromptFile,
+  parseAsDevSpec,
+  isDevSpec,
   extractCodeBlocks,
   getParseStatistics,
   findStepById,

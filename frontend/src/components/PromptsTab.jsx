@@ -18,7 +18,7 @@ import {
   Eye
 } from 'lucide-react';
 import clsx from 'clsx';
-import { parsePromptFile, validatePrompt, getParseStatistics } from '../lib/promptParser';
+import { parsePromptFile, validatePrompt, getParseStatistics, isDevSpec } from '../lib/promptParser';
 
 export default function PromptsTab({ steps, setSteps, isConnected, onTabChange }) {
   // 상태
@@ -29,6 +29,7 @@ export default function PromptsTab({ steps, setSteps, isConnected, onTabChange }
   const [error, setError] = useState(null);
   const [validation, setValidation] = useState(null);
   const [previewMode, setPreviewMode] = useState(false);
+  const [parseMode, setParseMode] = useState('auto'); // 'auto', 'steps', 'devspec'
 
   const fileInputRef = useRef(null);
   const textareaRef = useRef(null);
@@ -54,6 +55,13 @@ export default function PromptsTab({ steps, setSteps, isConnected, onTabChange }
       setPromptText(text);
       setFileName(file.name);
       setError(null);
+
+      // 자동 파싱 모드 감지
+      if (isDevSpec(text)) {
+        setParseMode('devspec');
+      } else {
+        setParseMode('auto');
+      }
 
       // 자동 검증
       const result = validatePrompt(text);
@@ -128,8 +136,9 @@ export default function PromptsTab({ steps, setSteps, isConnected, onTabChange }
     setError(null);
 
     try {
-      // 클라이언트 측 파싱
-      const parsed = parsePromptFile(promptText);
+      // 클라이언트 측 파싱 (parseMode 옵션 적용)
+      const options = parseMode === 'devspec' ? { forceDevSpec: true } : {};
+      const parsed = parsePromptFile(promptText, options);
 
       if (parsed.length === 0) {
         setError('스텝을 찾을 수 없습니다. 형식을 확인하세요.\n예: ### 프롬프트 1-1: 제목');
@@ -153,6 +162,7 @@ export default function PromptsTab({ steps, setSteps, isConnected, onTabChange }
     setValidation(null);
     setError(null);
     setPreviewMode(false);
+    setParseMode('auto');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -288,6 +298,53 @@ cd my-app && npm install
                 )}
               </div>
             </div>
+
+            {/* 파싱 모드 선택 */}
+            {promptText.trim() && (
+              <div className="p-3 bg-dark-200 rounded-lg space-y-2">
+                <div className="text-sm text-gray-400">파싱 모드:</div>
+                <div className="flex gap-2 flex-wrap">
+                  <button
+                    onClick={() => setParseMode('auto')}
+                    className={clsx(
+                      'px-3 py-1.5 text-sm rounded-lg transition-colors',
+                      parseMode === 'auto'
+                        ? 'bg-accent text-white'
+                        : 'bg-dark-300 hover:bg-dark-100'
+                    )}
+                  >
+                    자동 감지
+                  </button>
+                  <button
+                    onClick={() => setParseMode('steps')}
+                    className={clsx(
+                      'px-3 py-1.5 text-sm rounded-lg transition-colors',
+                      parseMode === 'steps'
+                        ? 'bg-accent text-white'
+                        : 'bg-dark-300 hover:bg-dark-100'
+                    )}
+                  >
+                    스텝별 가이드
+                  </button>
+                  <button
+                    onClick={() => setParseMode('devspec')}
+                    className={clsx(
+                      'px-3 py-1.5 text-sm rounded-lg transition-colors',
+                      parseMode === 'devspec'
+                        ? 'bg-accent text-white'
+                        : 'bg-dark-300 hover:bg-dark-100'
+                    )}
+                  >
+                    개발설계서 (단일 실행)
+                  </button>
+                </div>
+                {parseMode === 'devspec' && (
+                  <p className="text-xs text-purple-400">
+                    💡 전체 문서를 하나의 프롬프트로 Claude에게 전달합니다.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* 에러 메시지 */}
             {error && (
@@ -448,7 +505,12 @@ cd my-app && npm install
                   </div>
 
                   <div className="flex items-center gap-2 flex-shrink-0">
-                    {step.prompt && (
+                    {step.isDevSpec && (
+                      <span className="text-xs px-1.5 py-0.5 bg-purple-500/20 text-purple-400 rounded">
+                        전체 설계서
+                      </span>
+                    )}
+                    {step.prompt && !step.isDevSpec && (
                       <span className="text-xs text-success">✓ 프롬프트</span>
                     )}
                     <ChevronRight className="w-4 h-4 text-gray-500" />

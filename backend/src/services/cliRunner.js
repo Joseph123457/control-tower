@@ -10,6 +10,9 @@
 
 import { spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
+import { writeFileSync, readFileSync, unlinkSync, mkdirSync, existsSync } from 'fs';
+import { join, resolve, isAbsolute } from 'path';
+import { tmpdir, homedir } from 'os';
 import { logger } from '../utils/logger.js';
 
 // ============================================================
@@ -126,21 +129,81 @@ export class CliRunner extends EventEmitter {
     logger.info(`스텝 실행 시작: ${step.id} - ${step.title}`);
 
     return new Promise((resolve, reject) => {
-      // 명령어 인자 구성
-      const args = this._buildArgs(prompt, { sessionMode, skipPermissions });
+      // 긴 프롬프트 여부 확인
+      const MAX_INLINE_PROMPT = 1500;
+      const isLongPrompt = prompt.length > MAX_INLINE_PROMPT;
 
-      logger.debug(`실행 명령: claude ${args.join(' ')}`);
+      // 환경 변수 설정
+      const spawnEnv = {
+        ...process.env,
+        FORCE_COLOR: '1',
+        TERM: 'xterm-256color'
+      };
 
-      // 프로세스 spawn
-      this.currentProcess = spawn('claude', args, {
-        cwd: projectPath,
-        shell: true,
-        env: {
-          ...process.env,
-          FORCE_COLOR: '1', // 색상 출력 유지
-          TERM: 'xterm-256color'
-        }
-      });
+      // 기본 인자
+      const baseArgs = ['--dangerously-skip-permissions'];
+      if (sessionMode) {
+        baseArgs.push('--continue');
+      }
+
+      if (isLongPrompt) {
+        // 긴 프롬프트: stream-json 입력 형식 사용
+        logger.info(`긴 프롬프트 처리: ${prompt.length}자 (stream-json)`);
+
+        const args = [
+          '-p',
+          ...baseArgs,
+          '--input-format', 'stream-json',
+          '--output-format', 'stream-json',
+          '--verbose'
+        ];
+
+        const command = `claude ${args.join(' ')}`;
+        logger.debug(`실행 명령: ${command} (stdin으로 JSON 전달)`);
+
+        // shell: true로 실행하되 stdin pipe 열어두기
+        this.currentProcess = spawn(command, [], {
+          cwd: projectPath,
+          shell: true,
+          env: spawnEnv,
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        // stream-json 올바른 형식으로 프롬프트 전달
+        // 형식: {"type":"user","message":{"role":"user","content":"..."}}
+        const jsonMessage = JSON.stringify({
+          type: 'user',
+          message: {
+            role: 'user',
+            content: prompt
+          }
+        });
+
+        // stdin에 JSON 메시지 쓰기
+        this.currentProcess.stdin.write(jsonMessage + '\n');
+        this.currentProcess.stdin.end();
+
+        // stream-json 출력을 파싱하여 텍스트로 변환하는 플래그 설정
+        this._isStreamJson = true;
+
+      } else {
+        // 짧은 프롬프트: 직접 인자로 전달
+        const escapedPrompt = prompt
+          .replace(/\\/g, '\\\\')
+          .replace(/"/g, '\\"');
+
+        const args = ['-p', ...baseArgs, `"${escapedPrompt}"`];
+        const command = `claude ${args.join(' ')}`;
+
+        logger.debug(`실행 명령: claude -p ... "<prompt>"`);
+
+        this.currentProcess = spawn(command, [], {
+          cwd: projectPath,
+          shell: true,
+          env: spawnEnv,
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+      }
 
       // 타임아웃 설정
       const timeoutId = setTimeout(() => {
@@ -164,6 +227,9 @@ export class CliRunner extends EventEmitter {
       // 프로세스 종료 처리
       this.currentProcess.on('close', (code) => {
         clearTimeout(timeoutId);
+        this._cleanupTempFile(); // 임시 파일 정리
+        this._isStreamJson = false; // 플래그 초기화
+
         const duration = Date.now() - stepStartTime;
         const success = code === 0;
 
@@ -197,6 +263,8 @@ export class CliRunner extends EventEmitter {
       // 에러 처리
       this.currentProcess.on('error', (error) => {
         clearTimeout(timeoutId);
+        this._cleanupTempFile(); // 임시 파일 정리
+
         this.isRunning = false;
         this.currentProcess = null;
         this.currentStepId = null;
@@ -215,11 +283,74 @@ export class CliRunner extends EventEmitter {
   }
 
   /**
+   * 프로젝트 디렉토리 생성 및 초기화
+   * @param {string} projectPath - 기본 경로
+   * @param {string} projectName - 프로젝트 이름
+   * @returns {string} 실제 프로젝트 경로
+   */
+  _setupProjectDirectory(projectPath, projectName) {
+    // 절대 경로로 변환
+    let basePath = projectPath || '.';
+    if (!isAbsolute(basePath)) {
+      basePath = resolve(process.cwd(), basePath);
+    }
+
+    // '~' 처리
+    if (basePath.startsWith('~')) {
+      basePath = join(homedir(), basePath.slice(1));
+    }
+
+    // 프로젝트 폴더 경로
+    const fullPath = projectName ? join(basePath, projectName) : basePath;
+
+    // 디렉토리 생성
+    if (!existsSync(fullPath)) {
+      mkdirSync(fullPath, { recursive: true });
+      logger.info(`프로젝트 디렉토리 생성: ${fullPath}`);
+    }
+
+    return fullPath;
+  }
+
+  /**
+   * Git 자동 커밋
+   * @param {string} projectPath - 프로젝트 경로
+   * @param {string} message - 커밋 메시지
+   */
+  async _autoCommit(projectPath, message) {
+    try {
+      // git init (이미 있으면 무시됨)
+      execSync('git init', { cwd: projectPath, stdio: 'ignore' });
+
+      // git add all
+      execSync('git add -A', { cwd: projectPath, stdio: 'ignore' });
+
+      // git commit
+      const commitMsg = message || 'Auto-commit by Control Tower';
+      execSync(`git commit -m "${commitMsg}"`, { cwd: projectPath, stdio: 'ignore' });
+
+      logger.info(`자동 커밋 완료: ${commitMsg}`);
+      return true;
+    } catch (error) {
+      // 변경사항이 없으면 에러 무시
+      if (error.message.includes('nothing to commit')) {
+        logger.info('커밋할 변경사항 없음');
+        return true;
+      }
+      logger.warn(`자동 커밋 실패: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
    * 여러 스텝 순차 실행
    * @param {Array} steps - 스텝 배열
    * @param {Object} options - 실행 옵션
    * @param {boolean} options.stopOnError - 에러 시 중단 여부
    * @param {number} options.stepDelay - 스텝 간 딜레이 (ms)
+   * @param {string} options.projectPath - 프로젝트 기본 경로
+   * @param {string} options.projectName - 프로젝트 이름 (폴더명)
+   * @param {boolean} options.autoCommit - 완료 후 자동 커밋
    */
   async runAllSteps(steps, options = {}) {
     if (this.isRunning) {
@@ -229,12 +360,23 @@ export class CliRunner extends EventEmitter {
     const {
       stopOnError = true,
       stepDelay = STEP_DELAY,
+      projectPath = '.',
+      projectName = '',
+      autoCommit = true,
       ...stepOptions
     } = options;
+
+    // 프로젝트 디렉토리 설정
+    const actualProjectPath = this._setupProjectDirectory(projectPath, projectName);
+    logger.info(`프로젝트 경로: ${actualProjectPath}`);
+
+    // 스텝 옵션에 프로젝트 경로 추가
+    stepOptions.projectPath = actualProjectPath;
 
     this.startTime = Date.now();
     this.completedSteps = [];
     this.shouldStop = false;
+    this._currentProjectPath = actualProjectPath; // 자동 커밋용 저장
 
     const totalSteps = steps.length;
     let currentIndex = 0;
@@ -244,6 +386,7 @@ export class CliRunner extends EventEmitter {
     // run-start 이벤트
     this._emitEvent('run-start', {
       totalSteps,
+      projectPath: actualProjectPath,
       timestamp: new Date().toISOString()
     });
 
@@ -313,10 +456,35 @@ export class CliRunner extends EventEmitter {
     // 전체 완료
     const totalDuration = Date.now() - this.startTime;
 
+    // 자동 커밋
+    if (autoCommit && this.completedSteps.length > 0) {
+      this._emitEvent('step-output', {
+        stepId: 'system',
+        line: '📦 자동 커밋 중...',
+        type: 'system',
+        timestamp: new Date().toISOString()
+      });
+
+      const commitSuccess = await this._autoCommit(
+        actualProjectPath,
+        `feat: ${projectName || 'Project'} 자동 생성 by Control Tower`
+      );
+
+      if (commitSuccess) {
+        this._emitEvent('step-output', {
+          stepId: 'system',
+          line: '✅ Git 커밋 완료',
+          type: 'system',
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
     this._emitEvent('run-complete', {
       totalSteps,
       completedSteps: this.completedSteps.length,
       duration: totalDuration,
+      projectPath: actualProjectPath,
       timestamp: new Date().toISOString()
     });
 
@@ -402,6 +570,7 @@ export class CliRunner extends EventEmitter {
 
   /**
    * CLI 인자 구성
+   * 긴 프롬프트는 임시 파일로 저장하여 전달
    */
   _buildArgs(prompt, options) {
     const args = [];
@@ -421,14 +590,60 @@ export class CliRunner extends EventEmitter {
       args.push('--continue');
     }
 
-    // 프롬프트 내용 (쌍따옴표로 감싸기)
-    // Windows와 Unix에서 다르게 처리
-    const escapedPrompt = prompt
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"');
-    args.push(`"${escapedPrompt}"`);
+    // 프롬프트 길이에 따라 처리 방식 결정
+    // Windows 명령줄 제한: ~8191자, 안전하게 4000자로 제한
+    const MAX_INLINE_PROMPT = 4000;
+
+    if (prompt.length <= MAX_INLINE_PROMPT) {
+      // 짧은 프롬프트: 인라인으로 전달
+      const escapedPrompt = prompt
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, '\\n');
+      args.push(`"${escapedPrompt}"`);
+      this._tempPromptFile = null;
+    } else {
+      // 긴 프롬프트: 임시 파일 사용
+      const tempDir = join(tmpdir(), 'control-tower');
+      if (!existsSync(tempDir)) {
+        mkdirSync(tempDir, { recursive: true });
+      }
+
+      const tempFile = join(tempDir, `prompt-${Date.now()}.txt`);
+      writeFileSync(tempFile, prompt, 'utf8');
+      this._tempPromptFile = tempFile;
+
+      logger.info(`긴 프롬프트 임시 파일 저장: ${tempFile} (${prompt.length}자)`);
+
+      // 파일에서 프롬프트 읽기
+      // PowerShell에서 파일 내용을 읽어서 전달
+      if (process.platform === 'win32') {
+        // Windows: type 명령으로 파일 내용 출력 후 파이프
+        args.useFileInput = true;
+        args.tempFile = tempFile;
+      } else {
+        // Unix: 파일에서 읽기
+        args.useFileInput = true;
+        args.tempFile = tempFile;
+      }
+    }
 
     return args;
+  }
+
+  /**
+   * 임시 파일 정리
+   */
+  _cleanupTempFile() {
+    if (this._tempPromptFile) {
+      try {
+        unlinkSync(this._tempPromptFile);
+        logger.debug(`임시 파일 삭제: ${this._tempPromptFile}`);
+      } catch (err) {
+        logger.warn(`임시 파일 삭제 실패: ${err.message}`);
+      }
+      this._tempPromptFile = null;
+    }
   }
 
   /**
@@ -444,14 +659,54 @@ export class CliRunner extends EventEmitter {
     const lines = data.split('\n');
 
     for (const line of lines) {
-      if (line.trim()) {
-        this._emitEvent('step-output', {
-          stepId,
-          line: line,
-          type, // stdout 또는 stderr
-          timestamp: new Date().toISOString()
-        });
+      if (!line.trim()) continue;
+
+      let outputLine = line;
+
+      // stream-json 모드인 경우 JSON 파싱하여 텍스트 추출
+      if (this._isStreamJson && type === 'stdout') {
+        try {
+          const json = JSON.parse(line);
+
+          // assistant 메시지에서 텍스트 추출
+          if (json.type === 'assistant' && json.message?.content) {
+            const textContent = json.message.content
+              .filter(c => c.type === 'text')
+              .map(c => c.text)
+              .join('');
+            if (textContent) {
+              outputLine = textContent;
+            } else {
+              continue; // 텍스트가 없으면 스킵
+            }
+          }
+          // result 타입에서 최종 결과 추출
+          else if (json.type === 'result') {
+            if (json.result) {
+              outputLine = `\n═══ 완료 ═══\n${json.result}`;
+            } else {
+              continue;
+            }
+          }
+          // system, init 등은 스킵
+          else if (json.type === 'system') {
+            continue;
+          }
+          // 기타는 원본 출력
+          else {
+            continue;
+          }
+        } catch {
+          // JSON 파싱 실패시 원본 그대로
+        }
       }
+
+      this._emitEvent('step-output', {
+        stepId,
+        line: outputLine,
+        type,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
